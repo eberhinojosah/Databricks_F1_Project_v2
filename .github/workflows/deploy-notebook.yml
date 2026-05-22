@@ -29,7 +29,7 @@ env:
   PRD_TOKEN: ${{ secrets.DATABRICKS_DEST_TOKEN }}
   SOURCE_BASE: "/Workspace/Formula1_V2/F1_Project_v2/formula1-project"
   DEST_BASE: "/Workspace/Formula1_V2/F1_Project_v2/formula1-project"
-  CLUSTER_NAME: "cluster_SD"
+  CLUSTER_NAME: "V2_Formula1"
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────────────
