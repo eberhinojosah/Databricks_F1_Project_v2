@@ -1,15 +1,14 @@
 ###############################################################################
 # GitHub Actions Workflow: Deploy Formula1 Lakehouse to Production
 # 
-# Despliega notebooks, job desde DEV → PRD workspace
+# Despliega notebooks y job desde DEV → PRD workspace
 # Trigger: push a branch 'main' o manual (workflow_dispatch)
 #
 # Secrets requeridos en GitHub:
-#   - DATABRICKS_DEV_HOST:  https://<dev-workspace>.azuredatabricks.net               DATABRICKS_ORIGIN_HOST
-#   - DATABRICKS_DEV_TOKEN: Token del workspace DEV                                   DATABRICKS_ORIGIN_TOKEN
-#   - DATABRICKS_PRD_HOST:  https://<prd-workspace>.azuredatabricks.net               DATABRICKS_DEST_HOST
-#   - DATABRICKS_PRD_TOKEN: Token del workspace PRD (Service Principal recomendado)   DATABRICKS_DEST_TOKEN
-#   - PRD_SQL_WAREHOUSE_ID: (Opcional) ID del SQL Warehouse en PRD para dashboards
+#   - DATABRICKS_DEV_HOST:   https://<dev-workspace>.azuredatabricks.net
+#   - DATABRICKS_DEV_TOKEN:  Token del workspace DEV
+#   - DATABRICKS_PRD_HOST:   https://<prd-workspace>.azuredatabricks.net
+#   - DATABRICKS_PRD_TOKEN:  Token del workspace PRD (Service Principal recomendado)
 ###############################################################################
 
 name: Deploy Formula1 Lakehouse to Production
@@ -22,11 +21,6 @@ on:
       - 'formula1-project/**'
 
   workflow_dispatch:
-    inputs:
-      deploy_dashboards:
-        description: 'Deploy dashboards (true/false)'
-        required: false
-        default: 'true'
 
 env:
   DEV_HOST: ${{ secrets.DATABRICKS_DEV_HOST }}
@@ -72,21 +66,27 @@ jobs:
           for folder in "${FOLDERS[@]}"; do
             echo "📂 Listing notebooks in $SOURCE_BASE/$folder..."
 
-            RESPONSE=$(curl -s -X GET \
+            # Usar -G --data-urlencode para manejar espacios en rutas
+            RESPONSE=$(curl -s -G \
               -H "Authorization: Bearer $DEV_TOKEN" \
-              "$DEV_HOST/api/2.0/workspace/list?path=$SOURCE_BASE/$folder")
+              --data-urlencode "path=$SOURCE_BASE/$folder" \
+              "$DEV_HOST/api/2.0/workspace/list")
 
             echo "$RESPONSE" | jq -r '.objects[]? | select(.object_type=="NOTEBOOK") | .path' | while read nb_path; do
 
               nb_name=$(basename "$nb_path")
               mkdir -p "exported/$folder"
 
-              echo "⬇️ Exportando: $nb_name"
+              echo "  ⬇️ Exportando: $nb_name"
 
-              curl -s -X GET \
+              # Usar -G --data-urlencode para codificar correctamente rutas con espacios
+              curl -s -G \
                 -H "Authorization: Bearer $DEV_TOKEN" \
-                "$DEV_HOST/api/2.0/workspace/export?path=$nb_path&format=SOURCE&direct_download=true" \
-                --output "exported/$folder/$nb_name.py"
+                --data-urlencode "path=$nb_path" \
+                -d "format=SOURCE" \
+                -d "direct_download=true" \
+                --output "exported/$folder/$nb_name.py" \
+                "$DEV_HOST/api/2.0/workspace/export"
             done
           done
 
@@ -119,7 +119,7 @@ jobs:
               name=$(basename "$file" .py)
               dest_path="$DEST_BASE/$folder/$name"
 
-              echo "⬆️ Importando: $name"
+              echo "  ⬆️ Importando: $name"
 
               response=$(curl -s -X POST \
                 -H "Authorization: Bearer $PRD_TOKEN" \
@@ -131,7 +131,7 @@ jobs:
                 -F "content=@$file" \
                 "$PRD_HOST/api/2.0/workspace/import")
 
-              echo "Response: $response"
+              echo "    Response: $response"
             done
           done
 
@@ -158,7 +158,7 @@ jobs:
               -d "{\"job_id\": $existing_job_id}" \
               "$PRD_HOST/api/2.1/jobs/delete")
 
-            echo "Delete response: $delete_response"
+            echo "    Delete response: $delete_response"
           else
             echo "✅ No existe workflow previo"
           fi
@@ -177,12 +177,11 @@ jobs:
           cluster_id=$(echo "$clusters_response" | jq -r --arg name "$CLUSTER_NAME" '.clusters[]? | select(.cluster_name == $name) | .cluster_id')
 
           if [ "$cluster_id" != "" ] && [ "$cluster_id" != "null" ]; then
-
             echo "✅ Cluster encontrado: $cluster_id"
             echo "CLUSTER_ID=$cluster_id" >> $GITHUB_ENV
-
           else
-            echo "❌ Cluster no encontrado"
+            echo "❌ Cluster '$CLUSTER_NAME' no encontrado. Clusters disponibles:"
+            echo "$clusters_response" | jq -r '.clusters[]? | "   - \(.cluster_name) (\(.cluster_id)) [\(.state)]"'
             exit 1
           fi
 
@@ -193,55 +192,170 @@ jobs:
         run: |
           CLUSTER_ID="${{ env.CLUSTER_ID }}"
 
-          echo "🚀 Creando workflow: $WORKFLOW_NAME"
+          echo "🚀 Creando workflow: $WORKFLOW_NAME con cluster: $CLUSTER_ID"
 
           cat > workflow_config.json << EOF
           {
-            "name": "WF_FORMULA1_PRD",
+            "name": "$WORKFLOW_NAME",
             "format": "MULTI_TASK",
             "tasks": [
               {
-                "task_key": "bronze_layer",
-                "description": "Ejecución Bronze Layer",
-                "notebook_task": {
-                  "notebook_path": "/Workspace/Formula1_V2/F1_Project_v2/formula1-project/02-bronze",
-                  "source": "WORKSPACE"
-                },
+                "task_key": "01_ingest_circuits",
                 "existing_cluster_id": "$CLUSTER_ID",
-                "timeout_seconds": 3600,
-                "max_retries": 1
+                "notebook_task": {
+                  "notebook_path": "$DEST_BASE/02-bronze/01.Ingest Circuits File",
+                  "source": "WORKSPACE"
+                }
               },
               {
-                "task_key": "silver_layer",
-                "description": "Ejecución Silver Layer",
-                "depends_on": [
-                  {
-                    "task_key": "bronze_layer"
-                  }
-                ],
-                "notebook_task": {
-                  "notebook_path": "/Workspace/Formula1_V2/F1_Project_v2/formula1-project/03-silver",
-                  "source": "WORKSPACE"
-                },
+                "task_key": "02_ingest_races",
                 "existing_cluster_id": "$CLUSTER_ID",
-                "timeout_seconds": 3600,
-                "max_retries": 1
+                "notebook_task": {
+                  "notebook_path": "$DEST_BASE/02-bronze/02.Ingest Races File",
+                  "source": "WORKSPACE"
+                }
               },
               {
-                "task_key": "gold_layer",
-                "description": "Ejecución Gold Layer",
-                "depends_on": [
-                  {
-                    "task_key": "silver_layer"
-                  }
-                ],
-                "notebook_task": {
-                  "notebook_path": "/Workspace/Formula1_V2/F1_Project_v2/formula1-project/04-gold",
-                  "source": "WORKSPACE"
-                },
+                "task_key": "03_ingest_constructors",
                 "existing_cluster_id": "$CLUSTER_ID",
-                "timeout_seconds": 3600,
-                "max_retries": 1
+                "notebook_task": {
+                  "notebook_path": "$DEST_BASE/02-bronze/03.Ingest Constructors File",
+                  "source": "WORKSPACE"
+                }
+              },
+              {
+                "task_key": "04_ingest_drivers",
+                "existing_cluster_id": "$CLUSTER_ID",
+                "notebook_task": {
+                  "notebook_path": "$DEST_BASE/02-bronze/04.Ingest Drivers File",
+                  "source": "WORKSPACE"
+                }
+              },
+              {
+                "task_key": "05_ingest_results",
+                "existing_cluster_id": "$CLUSTER_ID",
+                "notebook_task": {
+                  "notebook_path": "$DEST_BASE/02-bronze/05.Ingest Results File",
+                  "source": "WORKSPACE"
+                }
+              },
+              {
+                "task_key": "06_ingest_sprints",
+                "existing_cluster_id": "$CLUSTER_ID",
+                "notebook_task": {
+                  "notebook_path": "$DEST_BASE/02-bronze/06.Ingest Sprints File",
+                  "source": "WORKSPACE"
+                }
+              },
+              {
+                "task_key": "01_transform_circuits",
+                "depends_on": [{"task_key": "01_ingest_circuits"}],
+                "existing_cluster_id": "$CLUSTER_ID",
+                "notebook_task": {
+                  "notebook_path": "$DEST_BASE/03-silver/01.Transform Circuits Data",
+                  "source": "WORKSPACE"
+                }
+              },
+              {
+                "task_key": "02_transform_races",
+                "depends_on": [{"task_key": "02_ingest_races"}],
+                "existing_cluster_id": "$CLUSTER_ID",
+                "notebook_task": {
+                  "notebook_path": "$DEST_BASE/03-silver/02.Transform Races Data",
+                  "source": "WORKSPACE"
+                }
+              },
+              {
+                "task_key": "03_transform_constructors",
+                "depends_on": [{"task_key": "03_ingest_constructors"}],
+                "existing_cluster_id": "$CLUSTER_ID",
+                "notebook_task": {
+                  "notebook_path": "$DEST_BASE/03-silver/03.Transform Constructors Data",
+                  "source": "WORKSPACE"
+                }
+              },
+              {
+                "task_key": "04_transform_drivers",
+                "depends_on": [{"task_key": "04_ingest_drivers"}],
+                "existing_cluster_id": "$CLUSTER_ID",
+                "notebook_task": {
+                  "notebook_path": "$DEST_BASE/03-silver/04.Transform Drivers Data",
+                  "source": "WORKSPACE"
+                }
+              },
+              {
+                "task_key": "05_transform_results",
+                "depends_on": [{"task_key": "05_ingest_results"}],
+                "existing_cluster_id": "$CLUSTER_ID",
+                "notebook_task": {
+                  "notebook_path": "$DEST_BASE/03-silver/05.Transform Results Data",
+                  "source": "WORKSPACE"
+                }
+              },
+              {
+                "task_key": "06_transform_sprints",
+                "depends_on": [{"task_key": "06_ingest_sprints"}],
+                "existing_cluster_id": "$CLUSTER_ID",
+                "notebook_task": {
+                  "notebook_path": "$DEST_BASE/03-silver/06.Transform Sprints Data",
+                  "source": "WORKSPACE"
+                }
+              },
+              {
+                "task_key": "91_build_nationality_region",
+                "existing_cluster_id": "$CLUSTER_ID",
+                "notebook_task": {
+                  "notebook_path": "$DEST_BASE/04-gold/91.Build Nationality Region Reference",
+                  "source": "WORKSPACE"
+                }
+              },
+              {
+                "task_key": "01_build_races_dim",
+                "depends_on": [
+                  {"task_key": "01_transform_circuits"},
+                  {"task_key": "02_transform_races"}
+                ],
+                "existing_cluster_id": "$CLUSTER_ID",
+                "notebook_task": {
+                  "notebook_path": "$DEST_BASE/04-gold/01.Build Races Dimension",
+                  "source": "WORKSPACE"
+                }
+              },
+              {
+                "task_key": "02_build_constructors_dim",
+                "depends_on": [
+                  {"task_key": "03_transform_constructors"},
+                  {"task_key": "91_build_nationality_region"}
+                ],
+                "existing_cluster_id": "$CLUSTER_ID",
+                "notebook_task": {
+                  "notebook_path": "$DEST_BASE/04-gold/02.Build Constructors Dimension",
+                  "source": "WORKSPACE"
+                }
+              },
+              {
+                "task_key": "03_build_drivers_dim",
+                "depends_on": [
+                  {"task_key": "04_transform_drivers"},
+                  {"task_key": "91_build_nationality_region"}
+                ],
+                "existing_cluster_id": "$CLUSTER_ID",
+                "notebook_task": {
+                  "notebook_path": "$DEST_BASE/04-gold/03.Build Drivers Dimension",
+                  "source": "WORKSPACE"
+                }
+              },
+              {
+                "task_key": "04_build_results_fact",
+                "depends_on": [
+                  {"task_key": "05_transform_results"},
+                  {"task_key": "06_transform_sprints"}
+                ],
+                "existing_cluster_id": "$CLUSTER_ID",
+                "notebook_task": {
+                  "notebook_path": "$DEST_BASE/04-gold/04.Build Results Fact",
+                  "source": "WORKSPACE"
+                }
               }
             ],
             "schedule": {
@@ -270,7 +384,35 @@ jobs:
 
           if [ "$job_id" != "" ] && [ "$job_id" != "null" ]; then
             echo "✅ Workflow creado correctamente ID: $job_id"
+            echo "JOB_ID=$job_id" >> $GITHUB_ENV
           else
             echo "❌ Error creando workflow"
+            echo "$create_response" | jq '.'
+            exit 1
+          fi
+
+      # ─────────────────────────────────────────────────────────────
+      # Ejecutar el workflow desplegado
+      # ─────────────────────────────────────────────────────────────
+      - name: Run deployed workflow
+        run: |
+          JOB_ID="${{ env.JOB_ID }}"
+          echo "🚀 Ejecutando workflow ID: $JOB_ID..."
+
+          run_response=$(curl -s -X POST \
+            -H "Authorization: Bearer $PRD_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"job_id\": $JOB_ID}" \
+            "$PRD_HOST/api/2.1/jobs/run-now")
+
+          run_id=$(echo "$run_response" | jq -r '.run_id')
+
+          if [ "$run_id" != "" ] && [ "$run_id" != "null" ]; then
+            echo "✅ Workflow ejecutado exitosamente!"
+            echo "   Run ID: $run_id"
+            echo "   Monitor: $PRD_HOST/#job/$JOB_ID/run/$run_id"
+          else
+            echo "❌ Error ejecutando workflow"
+            echo "$run_response" | jq '.'
             exit 1
           fi
