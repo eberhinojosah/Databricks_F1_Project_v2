@@ -394,17 +394,22 @@ jobs:
             echo "📊 Exporting dashboard: $DASH_NAME ($DASH_ID)..."
             
             # Obtener definición del dashboard desde DEV
-            DASH_DEF=$(curl -s -X GET \
+            # Guardar respuesta en archivo temporal para manejar JSON grandes
+            curl -s -X GET \
               -H "Authorization: Bearer $DEV_TOKEN" \
-              "$DEV_HOST/api/2.0/lakeview/dashboards/$DASH_ID")
+              "$DEV_HOST/api/2.0/lakeview/dashboards/$DASH_ID" \
+              --output /tmp/dash_response.json
             
-            # Extraer serialized_dashboard y display_name
-            SERIALIZED=$(echo "$DASH_DEF" | jq -r '.serialized_dashboard // empty')
-            DISPLAY_NAME=$(echo "$DASH_DEF" | jq -r '.display_name // empty')
+            # Extraer serialized_dashboard SIN -r (mantiene como JSON string escapado)
+            SERIALIZED=$(jq '.serialized_dashboard' /tmp/dash_response.json)
+            DISPLAY_NAME=$(jq -r '.display_name // empty' /tmp/dash_response.json)
             WAREHOUSE_ID_PRD="${{ secrets.PRD_SQL_WAREHOUSE_ID }}"
             
-            if [ -z "$SERIALIZED" ]; then
-              echo "⚠️  Could not export $DASH_NAME, skipping..."
+            # Verificar que serialized_dashboard no sea null o vacío
+            if [ "$SERIALIZED" == "null" ] || [ -z "$SERIALIZED" ]; then
+              echo "⚠️  Could not export $DASH_NAME (serialized_dashboard is null), skipping..."
+              echo "    API Response:"
+              jq '{dashboard_id, display_name, lifecycle_state}' /tmp/dash_response.json
               continue
             fi
             
@@ -414,24 +419,42 @@ jobs:
               "$PRD_HOST/api/2.0/lakeview/dashboards?page_size=100" | \
               jq -r --arg name "$DISPLAY_NAME" '.dashboards[]? | select(.display_name==$name) | .dashboard_id // empty')
             
+            # Construir payload de forma segura con jq (evita problemas de escapado)
+            jq -n \
+              --arg display_name "$DISPLAY_NAME" \
+              --argjson serialized_dashboard "$SERIALIZED" \
+              --arg warehouse_id "$WAREHOUSE_ID_PRD" \
+              '{display_name: $display_name, serialized_dashboard: $serialized_dashboard, warehouse_id: $warehouse_id}' \
+              > /tmp/dash_payload.json
+            
             if [ -n "$EXISTING" ]; then
               echo "🔄 Updating existing dashboard in PRD: $EXISTING"
-              curl -s -X PATCH \
+              HTTP_CODE=$(curl -s -o /tmp/dash_result.json -w "%{http_code}" -X PATCH \
                 -H "Authorization: Bearer $PRD_TOKEN" \
                 -H "Content-Type: application/json" \
-                -d "{\"display_name\": \"$DISPLAY_NAME\", \"serialized_dashboard\": $(echo "$SERIALIZED" | jq -R .), \"warehouse_id\": \"$WAREHOUSE_ID_PRD\"}" \
-                "$PRD_HOST/api/2.0/lakeview/dashboards/$EXISTING"
+                -d @/tmp/dash_payload.json \
+                "$PRD_HOST/api/2.0/lakeview/dashboards/$EXISTING")
             else
               echo "🆕 Creating dashboard in PRD: $DISPLAY_NAME"
-              curl -s -X POST \
+              HTTP_CODE=$(curl -s -o /tmp/dash_result.json -w "%{http_code}" -X POST \
                 -H "Authorization: Bearer $PRD_TOKEN" \
                 -H "Content-Type: application/json" \
-                -d "{\"display_name\": \"$DISPLAY_NAME\", \"serialized_dashboard\": $(echo "$SERIALIZED" | jq -R .), \"warehouse_id\": \"$WAREHOUSE_ID_PRD\"}" \
-                "$PRD_HOST/api/2.0/lakeview/dashboards"
+                -d @/tmp/dash_payload.json \
+                "$PRD_HOST/api/2.0/lakeview/dashboards")
             fi
             
-            echo "✅ Dashboard $DASH_NAME deployed"
+            # Verificar resultado
+            if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+              echo "✅ Dashboard $DASH_NAME deployed (HTTP $HTTP_CODE)"
+            else
+              echo "❌ Failed to deploy $DASH_NAME (HTTP $HTTP_CODE)"
+              jq '.' /tmp/dash_result.json
+              exit 1
+            fi
           done
+          
+          # Limpiar archivos temporales
+          rm -f /tmp/dash_response.json /tmp/dash_payload.json /tmp/dash_result.json
 
   # ─────────────────────────────────────────────────────────────────────────────
   # JOB 4: Configure External Locations (SOLO si se ejecuta manualmente)
