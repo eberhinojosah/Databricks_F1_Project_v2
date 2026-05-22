@@ -9,6 +9,7 @@
 #   - DATABRICKS_DEV_TOKEN: Token del workspace DEV                                   DATABRICKS_ORIGIN_TOKEN
 #   - DATABRICKS_PRD_HOST:  https://<prd-workspace>.azuredatabricks.net               DATABRICKS_DEST_HOST
 #   - DATABRICKS_PRD_TOKEN: Token del workspace PRD (Service Principal recomendado)   DATABRICKS_DEST_TOKEN
+#   - PRD_SQL_WAREHOUSE_ID: (Opcional) ID del SQL Warehouse en PRD para dashboards
 ###############################################################################
 
 name: Deploy Formula1 Lakehouse to Production
@@ -419,13 +420,23 @@ jobs:
               "$PRD_HOST/api/2.0/lakeview/dashboards?page_size=100" | \
               jq -r --arg name "$DISPLAY_NAME" '.dashboards[]? | select(.display_name==$name) | .dashboard_id // empty')
             
-            # Construir payload de forma segura con jq (evita problemas de escapado)
-            jq -n \
-              --arg display_name "$DISPLAY_NAME" \
-              --argjson serialized_dashboard "$SERIALIZED" \
-              --arg warehouse_id "$WAREHOUSE_ID_PRD" \
-              '{display_name: $display_name, serialized_dashboard: $serialized_dashboard, warehouse_id: $warehouse_id}' \
-              > /tmp/dash_payload.json
+            # Construir payload de forma segura con jq
+            # Solo incluir warehouse_id si el secret está configurado
+            if [ -n "$WAREHOUSE_ID_PRD" ]; then
+              jq -n \
+                --arg display_name "$DISPLAY_NAME" \
+                --argjson serialized_dashboard "$SERIALIZED" \
+                --arg warehouse_id "$WAREHOUSE_ID_PRD" \
+                '{display_name: $display_name, serialized_dashboard: $serialized_dashboard, warehouse_id: $warehouse_id}' \
+                > /tmp/dash_payload.json
+            else
+              echo "    ⚠️  PRD_SQL_WAREHOUSE_ID not set, deploying without warehouse assignment"
+              jq -n \
+                --arg display_name "$DISPLAY_NAME" \
+                --argjson serialized_dashboard "$SERIALIZED" \
+                '{display_name: $display_name, serialized_dashboard: $serialized_dashboard}' \
+                > /tmp/dash_payload.json
+            fi
             
             if [ -n "$EXISTING" ]; then
               echo "🔄 Updating existing dashboard in PRD: $EXISTING"
