@@ -55,9 +55,11 @@ jobs:
           for folder in "${FOLDERS[@]}"; do
             echo "📂 Listing notebooks in $SOURCE_BASE/$folder..."
             
-            RESPONSE=$(curl -s -X GET \
+            # Usar --data-urlencode para manejar espacios en rutas
+            RESPONSE=$(curl -s -G \
               -H "Authorization: Bearer $DEV_TOKEN" \
-              "$DEV_HOST/api/2.0/workspace/list?path=$SOURCE_BASE/$folder")
+              --data-urlencode "path=$SOURCE_BASE/$folder" \
+              "$DEV_HOST/api/2.0/workspace/list")
             
             # Extraer notebooks del listado
             echo "$RESPONSE" | jq -r '.objects[]? | select(.object_type=="NOTEBOOK") | .path' | while read nb_path; do
@@ -65,10 +67,14 @@ jobs:
               mkdir -p "exported/$folder"
               
               echo "  ⬇️  Exporting: $nb_name"
-              curl -s -X GET \
+              # Usar -G --data-urlencode para codificar correctamente rutas con espacios
+              curl -s -G \
                 -H "Authorization: Bearer $DEV_TOKEN" \
-                "$DEV_HOST/api/2.0/workspace/export?path=$nb_path&format=SOURCE&direct_download=true" \
-                --output "exported/$folder/$nb_name.py"
+                --data-urlencode "path=$nb_path" \
+                -d "format=SOURCE" \
+                -d "direct_download=true" \
+                --output "exported/$folder/$nb_name.py" \
+                "$DEV_HOST/api/2.0/workspace/export"
             done
           done
 
