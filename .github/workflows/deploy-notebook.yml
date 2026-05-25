@@ -203,6 +203,9 @@ jobs:
                 "notebook_task": {
                   "notebook_path": ($base + "/01-setup/01.Setup Project Environment"),  
                   "source": "WORKSPACE"
+                   "base_parameters": {
+                   "storageName": "eberdatabrickscoursedl"
+                   }
                 }
               },
               {
