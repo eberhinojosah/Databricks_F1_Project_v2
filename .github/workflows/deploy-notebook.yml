@@ -375,10 +375,10 @@ jobs:
               {
                 "task_key": "05_Grant_Security_Users_Groups_Permissions",
                 "depends_on": [
-                  {"task_key": "01_Build_Races_dimension"},
-                  {"task_key": "04_Build_Results_Fact"},
-                  {"task_key": "02_Build_Constructors_Dimension"},
-                  {"task_key": "03_Build_Drivers_Dimension"},
+                  {"task_key": "01_build_races_dimension"},
+                  {"task_key": "04_build_results_fact"},
+                  {"task_key": "02_build_constructors_dimension"},
+                  {"task_key": "03_build_drivers_dimension"}
                 ],
                 "existing_cluster_id": $cid,
                 "notebook_task": {
